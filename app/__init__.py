@@ -1,11 +1,21 @@
 """Badgeware Slideshow - Media viewer for the Tufty 2350."""
 
 import os
+import sys
 import gc
+
+APP_DIR = "/".join(__file__.replace("\\", "/").split("/")[:-1]) or "."
+os.chdir(APP_DIR)
+sys.path.insert(0, APP_DIR)
 
 from badgeware import run
 
-MEDIA_DIR = "/apps/slideshow/media"
+try:
+    mode(HIRES)
+except Exception:
+    pass  # HIRES may not be available on all firmware versions
+
+MEDIA_DIR = "media"
 OVERLAY_TICKS = 90  # frames to show overlay (~1.5s at ~60fps)
 
 # State
@@ -25,7 +35,6 @@ paused = False
 overlay_ticks_left = 0
 
 # Display state
-needs_redraw = True
 current_img = None
 
 
@@ -137,7 +146,7 @@ def load_image(path):
 
 def load_item():
     """Load the current media item."""
-    global anim_frame, anim_count, anim_delay, anim_tick, paused, needs_redraw
+    global anim_frame, anim_count, anim_delay, anim_tick, paused
     path = current_path()
     anim_frame = 0
     anim_tick = 0
@@ -150,7 +159,6 @@ def load_item():
         anim_count = 0
         anim_delay = 6
         load_image(path)
-    needs_redraw = True
 
 
 def switch_playlist(new_idx):
@@ -227,7 +235,7 @@ def init():
 
 def update():
     global item_idx, anim_frame, anim_tick, paused
-    global needs_redraw, overlay_ticks_left
+    global overlay_ticks_left
 
     if not playlists:
         show_no_media()
@@ -266,27 +274,21 @@ def update():
             anim_frame = (anim_frame + 1) % max(anim_count, 1)
             frame_path = path + "/frame_{:03d}.png".format(anim_frame)
             load_image(frame_path)
-            needs_redraw = True
 
-    # Rendering
+    # Rendering - must draw every frame as the framework clears between updates
     if path is None:
         show_no_media()
         return
 
-    if needs_redraw or overlay_ticks_left > 0:
-        screen.pen = color.rgb(0, 0, 0)
-        screen.clear()
+    screen.pen = color.rgb(0, 0, 0)
+    screen.clear()
 
-        if current_img:
-            screen.blit(current_img, vec2(0, 0))
+    if current_img:
+        screen.blit(current_img, vec2(0, 0))
 
-        if overlay_ticks_left > 0:
-            draw_overlay()
-            overlay_ticks_left -= 1
-            if overlay_ticks_left == 0:
-                needs_redraw = True  # redraw without overlay
-
-        needs_redraw = False
+    if overlay_ticks_left > 0:
+        draw_overlay()
+        overlay_ticks_left -= 1
 
 
 run(update, init=init)
