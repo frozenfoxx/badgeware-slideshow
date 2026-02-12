@@ -1,22 +1,30 @@
 #!/usr/bin/env python3
-"""Convert media files (images, GIFs, videos) into Tufty 2350-ready format.
+"""Convert media files in-place for the Tufty 2350 badge.
 
-Outputs 320x240 non-progressive JPEGs, letterboxed to fit. Animated GIFs and
-videos are extracted into numbered frame directories with a meta.txt file.
+Scans playlist directories under app/media/, converts any non-ready files
+(PNGs, BMPs, WebPs, GIFs, videos) into 320x240 non-progressive JPEGs,
+and removes the originals.
+
+Files that are already badge-ready (320x240 non-progressive JPEGs) are
+left untouched. Animated GIFs and videos are extracted into numbered
+frame directories with a meta.txt file.
 
 Usage:
-    python convert_media.py INPUT [INPUT ...] --playlist NAME [--output DIR]
+    python convert_media.py [--media-dir DIR]
 
 Examples:
-    python convert_media.py photo.png --playlist furry
-    python convert_media.py animation.gif --playlist funny
-    python convert_media.py clip.mp4 --playlist gaming
-    python convert_media.py ./my_images/ --playlist default
+    # Convert everything under app/media/
+    python convert_media.py
+
+    # Specify a custom media directory
+    python convert_media.py --media-dir /path/to/media
 """
 
 import argparse
+import json
 import os
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -34,6 +42,7 @@ JPEG_QUALITY = 85
 SUPPORTED_IMAGES = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 SUPPORTED_GIFS = {".gif"}
 SUPPORTED_VIDEOS = {".mp4", ".avi", ".mov", ".webm", ".mkv"}
+ALL_SUPPORTED = SUPPORTED_IMAGES | SUPPORTED_GIFS | SUPPORTED_VIDEOS
 
 
 def letterbox(img, target_w, target_h):
@@ -56,36 +65,85 @@ def save_jpeg(img, path):
     img.save(path, "JPEG", quality=JPEG_QUALITY, progressive=False)
 
 
-def convert_static_image(input_path, output_dir):
-    """Convert a static image to 320x240 JPEG."""
+def is_badge_ready_jpeg(path):
+    """Check if a JPEG is already 320x240 and non-progressive."""
+    try:
+        with Image.open(path) as img:
+            if img.format != "JPEG":
+                return False
+            if img.size != (DISPLAY_WIDTH, DISPLAY_HEIGHT):
+                return False
+            # Check for progressive flag
+            if img.info.get("progressive", False):
+                return False
+            return True
+    except Exception:
+        return False
+
+
+def unique_path(path):
+    """Return a unique path by appending _N if it already exists."""
+    if not os.path.exists(path):
+        return path
+    base, ext = os.path.splitext(path)
+    counter = 1
+    while os.path.exists(f"{base}_{counter}{ext}"):
+        counter += 1
+    return f"{base}_{counter}{ext}"
+
+
+def unique_dir(path):
+    """Return a unique directory path by appending _N if it already exists."""
+    if not os.path.exists(path):
+        return path
+    counter = 1
+    while os.path.exists(f"{path}_{counter}"):
+        counter += 1
+    return f"{path}_{counter}"
+
+
+def convert_static_image(input_path):
+    """Convert a static image to 320x240 JPEG in-place."""
+    ext = Path(input_path).suffix.lower()
+
+    # If it's already a badge-ready JPEG, skip it
+    if ext in (".jpg", ".jpeg") and is_badge_ready_jpeg(input_path):
+        print(f"  Already ready: {input_path}")
+        return
+
     img = Image.open(input_path)
     img = letterbox(img, DISPLAY_WIDTH, DISPLAY_HEIGHT)
+
     stem = Path(input_path).stem
-    out_path = os.path.join(output_dir, f"{stem}.jpg")
-    # Avoid name collisions
-    counter = 1
-    while os.path.exists(out_path):
-        out_path = os.path.join(output_dir, f"{stem}_{counter}.jpg")
-        counter += 1
-    save_jpeg(img, out_path)
-    print(f"  Converted image: {out_path}")
+    parent = str(Path(input_path).parent)
+    out_path = os.path.join(parent, f"{stem}.jpg")
+
+    # If converting from a non-JPEG, output will have a different extension
+    # so we can safely write then delete the original
+    if ext not in (".jpg", ".jpeg"):
+        out_path = unique_path(out_path)
+        save_jpeg(img, out_path)
+        os.remove(input_path)
+        print(f"  Converted: {input_path} -> {out_path}")
+    else:
+        # Overwrite the JPEG in-place (it needs resizing or is progressive)
+        save_jpeg(img, input_path)
+        print(f"  Re-encoded: {input_path}")
 
 
-def convert_gif(input_path, output_dir):
-    """Convert an animated GIF to a directory of JPEG frames + meta.txt."""
+def convert_gif(input_path):
+    """Convert an animated GIF to a directory of JPEG frames + meta.txt, in-place."""
     img = Image.open(input_path)
     n_frames = getattr(img, "n_frames", 1)
 
     if n_frames <= 1:
-        convert_static_image(input_path, output_dir)
+        # Single-frame GIF, treat as static image
+        convert_static_image(input_path)
         return
 
     stem = Path(input_path).stem
-    frame_dir = os.path.join(output_dir, stem)
-    counter = 1
-    while os.path.exists(frame_dir):
-        frame_dir = os.path.join(output_dir, f"{stem}_{counter}")
-        counter += 1
+    parent = str(Path(input_path).parent)
+    frame_dir = unique_dir(os.path.join(parent, stem))
     os.makedirs(frame_dir)
 
     # Get frame delay (in ms), default to 100ms
@@ -103,21 +161,21 @@ def convert_gif(input_path, output_dir):
         f.write(f"frame_count={n_frames}\n")
         f.write(f"delay_ms={delay_ms}\n")
 
-    print(f"  Converted GIF ({n_frames} frames): {frame_dir}")
+    # Remove original GIF
+    img.close()
+    os.remove(input_path)
+    print(f"  Converted GIF ({n_frames} frames): {input_path} -> {frame_dir}")
 
 
-def convert_video(input_path, output_dir):
-    """Convert a video to a directory of JPEG frames + meta.txt using ffmpeg."""
+def convert_video(input_path):
+    """Convert a video to a directory of JPEG frames + meta.txt, in-place."""
     if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
         print(f"  Error: ffmpeg/ffprobe not found. Skipping {input_path}")
         return
 
     stem = Path(input_path).stem
-    frame_dir = os.path.join(output_dir, stem)
-    counter = 1
-    while os.path.exists(frame_dir):
-        frame_dir = os.path.join(output_dir, f"{stem}_{counter}")
-        counter += 1
+    parent = str(Path(input_path).parent)
+    frame_dir = unique_dir(os.path.join(parent, stem))
     os.makedirs(frame_dir)
 
     # Get video FPS
@@ -127,7 +185,6 @@ def convert_video(input_path, output_dir):
              "-show_streams", str(input_path)],
             capture_output=True, text=True, check=True
         )
-        import json
         streams = json.loads(result.stdout)
         fps = 10  # default
         for stream in streams.get("streams", []):
@@ -161,63 +218,98 @@ def convert_video(input_path, output_dir):
                 os.path.join(frame_dir, f"frame_{i:03d}.jpg")
             )
 
-    frame_count = len(os.listdir(frame_dir)) - 1  # exclude meta.txt we're about to write
+    frame_count = len([x for x in os.listdir(frame_dir) if x.endswith(".jpg")])
     with open(os.path.join(frame_dir, "meta.txt"), "w") as f:
-        f.write(f"frame_count={len([x for x in os.listdir(frame_dir) if x.endswith('.jpg')])}\n")
+        f.write(f"frame_count={frame_count}\n")
         f.write(f"delay_ms={delay_ms}\n")
 
-    print(f"  Converted video ({frame_count} frames @ {target_fps}fps): {frame_dir}")
+    # Remove original video
+    os.remove(input_path)
+    print(f"  Converted video ({frame_count} frames @ {target_fps}fps): {input_path} -> {frame_dir}")
 
 
-def process_input(input_path, output_dir):
-    """Route a single input file to the appropriate converter."""
-    ext = Path(input_path).suffix.lower()
-    if ext in SUPPORTED_IMAGES:
-        convert_static_image(input_path, output_dir)
-    elif ext in SUPPORTED_GIFS:
-        convert_gif(input_path, output_dir)
+def is_converted_anim_dir(path):
+    """Check if a directory is an already-converted animation (has meta.txt and frame files)."""
+    if not os.path.isdir(path):
+        return False
+    contents = os.listdir(path)
+    has_meta = "meta.txt" in contents
+    has_frames = any(f.startswith("frame_") and f.endswith(".jpg") for f in contents)
+    return has_meta and has_frames
+
+
+def process_file(file_path):
+    """Route a single file to the appropriate converter."""
+    ext = Path(file_path).suffix.lower()
+    if ext in SUPPORTED_GIFS:
+        convert_gif(file_path)
     elif ext in SUPPORTED_VIDEOS:
-        convert_video(input_path, output_dir)
+        convert_video(file_path)
+    elif ext in SUPPORTED_IMAGES:
+        convert_static_image(file_path)
     else:
-        print(f"  Skipping unsupported file: {input_path}")
+        print(f"  Skipping unsupported file: {file_path}")
+
+
+def process_playlist(playlist_dir):
+    """Process all unconverted files in a playlist directory."""
+    print(f"Playlist: {os.path.basename(playlist_dir)}/")
+
+    entries = sorted(os.listdir(playlist_dir))
+    found = False
+
+    for entry in entries:
+        full_path = os.path.join(playlist_dir, entry)
+
+        # Skip hidden files and already-converted animation directories
+        if entry.startswith("."):
+            continue
+        if os.path.isdir(full_path):
+            if is_converted_anim_dir(full_path):
+                print(f"  Already converted: {full_path}")
+            continue
+
+        ext = Path(entry).suffix.lower()
+        if ext in ALL_SUPPORTED:
+            found = True
+            process_file(full_path)
+
+    if not found:
+        print("  No files to convert.")
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Convert media for Badgeware Slideshow (Tufty 2350)"
+        description="Convert media in-place for Badgeware Slideshow (Tufty 2350)"
     )
     parser.add_argument(
-        "inputs", nargs="+",
-        help="Input file(s) or directory to convert"
-    )
-    parser.add_argument(
-        "--playlist", default="default",
-        help="Playlist (category) name (default: 'default')"
-    )
-    parser.add_argument(
-        "--output", default=os.path.join(os.path.dirname(__file__), "..", "app", "media"),
-        help="Output media directory (default: app/media)"
+        "--media-dir",
+        default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "app", "media"),
+        help="Path to the media directory (default: app/media)"
     )
     args = parser.parse_args()
 
-    output_dir = os.path.join(os.path.abspath(args.output), args.playlist)
-    os.makedirs(output_dir, exist_ok=True)
+    media_dir = os.path.abspath(args.media_dir)
+    if not os.path.isdir(media_dir):
+        print(f"Error: Media directory not found: {media_dir}")
+        sys.exit(1)
 
-    print(f"Output playlist: {output_dir}")
+    print(f"Media directory: {media_dir}\n")
 
-    for input_path in args.inputs:
-        input_path = os.path.abspath(input_path)
-        if os.path.isdir(input_path):
-            print(f"Processing directory: {input_path}")
-            for fname in sorted(os.listdir(input_path)):
-                fpath = os.path.join(input_path, fname)
-                if os.path.isfile(fpath):
-                    process_input(fpath, output_dir)
-        elif os.path.isfile(input_path):
-            print(f"Processing file: {input_path}")
-            process_input(input_path, output_dir)
-        else:
-            print(f"Not found: {input_path}")
+    # Find all playlist directories
+    playlists = sorted(
+        entry for entry in os.listdir(media_dir)
+        if os.path.isdir(os.path.join(media_dir, entry)) and not entry.startswith(".")
+    )
+
+    if not playlists:
+        print("No playlist directories found. Create directories under media/ first.")
+        print("Example: media/default/, media/furry/, media/gaming/")
+        sys.exit(1)
+
+    for playlist in playlists:
+        process_playlist(os.path.join(media_dir, playlist))
+        print()
 
     print("Done.")
 

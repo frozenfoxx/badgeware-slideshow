@@ -30,23 +30,22 @@ pip install -r scripts/requirements.txt
 
 ### 1. Prepare Your Media
 
-Organize your source media (images, GIFs, videos) into folders by playlist. Then use the conversion script to prepare them for the badge's 320x240 display.
+Place your source media files (images, GIFs, videos) directly into playlist directories under `app/media/`. Create a directory for each playlist you want:
 
-```bash
-# Convert a folder of images into a playlist called "furry"
-python scripts/convert_media.py ./my_furry_pics/ --playlist furry
-
-# Convert a single GIF into the "funny" playlist
-python scripts/convert_media.py dancing_cat.gif --playlist funny
-
-# Convert a video clip
-python scripts/convert_media.py clip.mp4 --playlist gaming
-
-# Convert files into the default playlist
-python scripts/convert_media.py photo.jpg
+```
+app/media/
+├── furry/
+│   ├── 001_cute_fox.png
+│   ├── 002_dancing_cat.gif
+│   └── 003_wolf_howl.mp4
+├── gaming/
+│   ├── highlight_reel.mp4
+│   └── victory_screen.bmp
+└── funny/
+    └── meme.webp
 ```
 
-If you want your media to play in a specific order, name your source files with a numeric prefix:
+If you want your media to play in a specific order, name your files with a numeric prefix:
 
 ```
 001_first_image.jpg
@@ -54,7 +53,20 @@ If you want your media to play in a specific order, name your source files with 
 003_my_animation.gif
 ```
 
-Converted media is output to `app/media/<playlist>/`.
+Then run the conversion script. It will scan every playlist directory, convert all files in-place to badge-ready 320x240 JPEGs, and remove the originals:
+
+```bash
+pip install -r scripts/requirements.txt
+python scripts/convert_media.py
+```
+
+Already-converted files (320x240 non-progressive JPEGs) and animation directories are left untouched, so the script is safe to run repeatedly.
+
+To use a custom media directory:
+
+```bash
+python scripts/convert_media.py --media-dir /path/to/media
+```
 
 ### 2. Deploy to Badge
 
