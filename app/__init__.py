@@ -105,21 +105,17 @@ def get_items(playlist):
 def read_meta(anim_dir):
     """Read meta.txt from an animation directory. Returns (frame_count, delay_ticks)."""
     frame_count = 0
-    delay_ms = 100
     try:
         with open(anim_dir + "/meta.txt", "r") as f:
             for line in f:
                 line = line.strip()
                 if line.startswith("frame_count="):
                     frame_count = int(line.split("=")[1])
-                elif line.startswith("delay_ms="):
-                    delay_ms = int(line.split("=")[1])
     except OSError:
         frames = [f for f in listdir_safe(anim_dir) if f.startswith("frame_") and f.endswith(".png")]
         frame_count = len(frames)
-    # Convert delay_ms to approximate ticks (assuming ~60fps → ~16ms per tick)
-    delay_ticks = max(delay_ms // 16, 1)
-    return frame_count, delay_ticks
+    # Advance one frame per update() tick; PNG loading time is the natural rate limiter
+    return frame_count, 1
 
 
 def current_path():
