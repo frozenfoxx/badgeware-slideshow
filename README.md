@@ -1,5 +1,7 @@
 # badgeware-slideshow
 
+[![syntax](https://github.com/frozenfoxx/badgeware-slideshow/actions/workflows/syntax.yml/badge.svg)](https://github.com/frozenfoxx/badgeware-slideshow/actions/workflows/syntax.yml)
+
 A media slideshow app for the Badgeware series of badges. Browse static images and animations organized into playlists, controlled with the badge's buttons.
 
 ## Requirements
