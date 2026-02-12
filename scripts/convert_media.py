@@ -2,12 +2,12 @@
 """Convert media files in-place for the Tufty 2350 badge.
 
 Scans playlist directories under app/media/, converts any non-ready files
-(PNGs, BMPs, WebPs, GIFs, videos) into 320x240 non-progressive JPEGs,
-and removes the originals.
+(JPEGs, BMPs, WebPs, GIFs, videos) into 320x240 PNGs, and removes the
+originals.
 
-Files that are already badge-ready (320x240 non-progressive JPEGs) are
-left untouched. Animated GIFs and videos are extracted into numbered
-frame directories with a meta.txt file.
+Files that are already badge-ready (320x240 PNGs) are left untouched.
+Animated GIFs and videos are extracted into numbered frame directories
+with a meta.txt file.
 
 Usage:
     python convert_media.py [--media-dir DIR]
@@ -24,7 +24,6 @@ import argparse
 import json
 import os
 import shutil
-import struct
 import subprocess
 import sys
 import tempfile
@@ -38,7 +37,6 @@ except ImportError:
 
 DISPLAY_WIDTH = 320
 DISPLAY_HEIGHT = 240
-JPEG_QUALITY = 85
 SUPPORTED_IMAGES = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 SUPPORTED_GIFS = {".gif"}
 SUPPORTED_VIDEOS = {".mp4", ".avi", ".mov", ".webm", ".mkv"}
@@ -59,22 +57,19 @@ def letterbox(img, target_w, target_h):
     return canvas
 
 
-def save_jpeg(img, path):
-    """Save image as non-progressive JPEG."""
+def save_png(img, path):
+    """Save image as PNG."""
     img = img.convert("RGB")
-    img.save(path, "JPEG", quality=JPEG_QUALITY, progressive=False)
+    img.save(path, "PNG")
 
 
-def is_badge_ready_jpeg(path):
-    """Check if a JPEG is already 320x240 and non-progressive."""
+def is_badge_ready_png(path):
+    """Check if a PNG is already 320x240."""
     try:
         with Image.open(path) as img:
-            if img.format != "JPEG":
+            if img.format != "PNG":
                 return False
             if img.size != (DISPLAY_WIDTH, DISPLAY_HEIGHT):
-                return False
-            # Check for progressive flag
-            if img.info.get("progressive", False):
                 return False
             return True
     except Exception:
@@ -103,11 +98,11 @@ def unique_dir(path):
 
 
 def convert_static_image(input_path):
-    """Convert a static image to 320x240 JPEG in-place."""
+    """Convert a static image to 320x240 PNG in-place."""
     ext = Path(input_path).suffix.lower()
 
-    # If it's already a badge-ready JPEG, skip it
-    if ext in (".jpg", ".jpeg") and is_badge_ready_jpeg(input_path):
+    # If it's already a badge-ready PNG, skip it
+    if ext == ".png" and is_badge_ready_png(input_path):
         print(f"  Already ready: {input_path}")
         return
 
@@ -116,23 +111,22 @@ def convert_static_image(input_path):
 
     stem = Path(input_path).stem
     parent = str(Path(input_path).parent)
-    out_path = os.path.join(parent, f"{stem}.jpg")
+    out_path = os.path.join(parent, f"{stem}.png")
 
-    # If converting from a non-JPEG, output will have a different extension
-    # so we can safely write then delete the original
-    if ext not in (".jpg", ".jpeg"):
+    if ext != ".png":
+        # Different extension, write new file then delete original
         out_path = unique_path(out_path)
-        save_jpeg(img, out_path)
+        save_png(img, out_path)
         os.remove(input_path)
         print(f"  Converted: {input_path} -> {out_path}")
     else:
-        # Overwrite the JPEG in-place (it needs resizing or is progressive)
-        save_jpeg(img, input_path)
+        # PNG but wrong size, overwrite in-place
+        save_png(img, input_path)
         print(f"  Re-encoded: {input_path}")
 
 
 def convert_gif(input_path):
-    """Convert an animated GIF to a directory of JPEG frames + meta.txt, in-place."""
+    """Convert an animated GIF to a directory of PNG frames + meta.txt, in-place."""
     img = Image.open(input_path)
     n_frames = getattr(img, "n_frames", 1)
 
@@ -155,7 +149,7 @@ def convert_gif(input_path):
         img.seek(i)
         frame = img.convert("RGB")
         frame = letterbox(frame, DISPLAY_WIDTH, DISPLAY_HEIGHT)
-        save_jpeg(frame, os.path.join(frame_dir, f"frame_{i:03d}.jpg"))
+        save_png(frame, os.path.join(frame_dir, f"frame_{i:03d}.png"))
 
     with open(os.path.join(frame_dir, "meta.txt"), "w") as f:
         f.write(f"frame_count={n_frames}\n")
@@ -168,7 +162,7 @@ def convert_gif(input_path):
 
 
 def convert_video(input_path):
-    """Convert a video to a directory of JPEG frames + meta.txt, in-place."""
+    """Convert a video to a directory of PNG frames + meta.txt, in-place."""
     if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
         print(f"  Error: ffmpeg/ffprobe not found. Skipping {input_path}")
         return
@@ -200,25 +194,25 @@ def convert_video(input_path):
     target_fps = min(fps, 15)
     delay_ms = int(1000 / target_fps)
 
-    # Extract frames with ffmpeg
+    # Extract frames with ffmpeg as PNG
     with tempfile.TemporaryDirectory() as tmpdir:
         subprocess.run(
             ["ffmpeg", "-i", str(input_path), "-vf",
              f"fps={target_fps},scale={DISPLAY_WIDTH}:{DISPLAY_HEIGHT}:"
              f"force_original_aspect_ratio=decrease,"
              f"pad={DISPLAY_WIDTH}:{DISPLAY_HEIGHT}:(ow-iw)/2:(oh-ih)/2:black",
-             "-q:v", "3", os.path.join(tmpdir, "frame_%03d.jpg")],
+             os.path.join(tmpdir, "frame_%03d.png")],
             capture_output=True, check=True
         )
 
-        frames = sorted(f for f in os.listdir(tmpdir) if f.endswith(".jpg"))
+        frames = sorted(f for f in os.listdir(tmpdir) if f.endswith(".png"))
         for i, fname in enumerate(frames):
             shutil.move(
                 os.path.join(tmpdir, fname),
-                os.path.join(frame_dir, f"frame_{i:03d}.jpg")
+                os.path.join(frame_dir, f"frame_{i:03d}.png")
             )
 
-    frame_count = len([x for x in os.listdir(frame_dir) if x.endswith(".jpg")])
+    frame_count = len([x for x in os.listdir(frame_dir) if x.endswith(".png")])
     with open(os.path.join(frame_dir, "meta.txt"), "w") as f:
         f.write(f"frame_count={frame_count}\n")
         f.write(f"delay_ms={delay_ms}\n")
@@ -234,7 +228,7 @@ def is_converted_anim_dir(path):
         return False
     contents = os.listdir(path)
     has_meta = "meta.txt" in contents
-    has_frames = any(f.startswith("frame_") and f.endswith(".jpg") for f in contents)
+    has_frames = any(f.startswith("frame_") and f.endswith(".png") for f in contents)
     return has_meta and has_frames
 
 

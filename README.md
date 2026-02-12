@@ -53,14 +53,14 @@ If you want your media to play in a specific order, name your files with a numer
 003_my_animation.gif
 ```
 
-Then run the conversion script. It will scan every playlist directory, convert all files in-place to badge-ready 320x240 JPEGs, and remove the originals:
+Then run the conversion script. It will scan every playlist directory, convert all files in-place to badge-ready 320x240 PNGs, and remove the originals:
 
 ```bash
 pip install -r scripts/requirements.txt
 python scripts/convert_media.py
 ```
 
-Already-converted files (320x240 non-progressive JPEGs) and animation directories are left untouched, so the script is safe to run repeatedly.
+Already-converted files (320x240 PNGs) and animation directories are left untouched, so the script is safe to run repeatedly.
 
 To use a custom media directory:
 
@@ -80,11 +80,11 @@ Badge root/
         ├── icon.png
         └── media/
             ├── furry/
-            │   ├── photo1.jpg
+            │   ├── photo1.png
             │   └── cool_animation/
             │       ├── meta.txt
-            │       ├── frame_000.jpg
-            │       ├── frame_001.jpg
+            │       ├── frame_000.png
+            │       ├── frame_001.png
             │       └── ...
             └── gaming/
                 └── ...
@@ -114,9 +114,9 @@ If you place media files directly in `media/` without any subdirectories, the ap
 
 | Source Format | Converted To |
 |---------------|-------------|
-| Static images (.jpg, .png, .bmp, .webp) | Single 320x240 JPEG |
-| Animated GIFs (.gif) | Directory of JPEG frames + meta.txt |
-| Videos (.mp4, .avi, .mov, .webm, .mkv) | Directory of JPEG frames + meta.txt |
+| Static images (.jpg, .png, .bmp, .webp) | Single 320x240 PNG |
+| Animated GIFs (.gif) | Directory of PNG frames + meta.txt |
+| Videos (.mp4, .avi, .mov, .webm, .mkv) | Directory of PNG frames + meta.txt |
 
 ## Contributing
 

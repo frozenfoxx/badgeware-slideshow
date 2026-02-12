@@ -1,32 +1,32 @@
 """Badgeware Slideshow - Media viewer for the Tufty 2350."""
 
 import os
-import time
-from picographics import PicoGraphics, DISPLAY_TUFTY_2350
-from jpegdec import JPEG
+import gc
+
+from badgeware import run
 
 MEDIA_DIR = "/apps/slideshow/media"
-DISPLAY_W = 320
-DISPLAY_H = 240
-DEBOUNCE_MS = 200
-OVERLAY_DURATION_MS = 1500
+OVERLAY_TICKS = 90  # frames to show overlay (~1.5s at ~60fps)
 
-# Button pins (Tufty 2350)
-try:
-    from machine import Pin
-    btn_a = Pin(7, Pin.IN, Pin.PULL_UP)
-    btn_b = Pin(8, Pin.IN, Pin.PULL_UP)
-    btn_c = Pin(9, Pin.IN, Pin.PULL_UP)
-    btn_up = Pin(22, Pin.IN, Pin.PULL_UP)
-    btn_down = Pin(11, Pin.IN, Pin.PULL_UP)
-except Exception:
-    btn_a = btn_b = btn_c = btn_up = btn_down = None
+# State
+playlists = []
+playlist_idx = 0
+items = []
+item_idx = 0
 
+# Animation state
+anim_frame = 0
+anim_count = 0
+anim_delay = 6  # ticks between frames
+anim_tick = 0
+paused = False
 
-def is_pressed(btn):
-    if btn is None:
-        return False
-    return btn.value() == 0
+# Overlay state
+overlay_ticks_left = 0
+
+# Display state
+needs_redraw = True
+current_img = None
 
 
 def listdir_safe(path):
@@ -51,7 +51,7 @@ def ensure_playlists():
     for e in entries:
         full = MEDIA_DIR + "/" + e
         if is_dir(full):
-            if e != ".gitkeep":
+            if not e.startswith("."):
                 has_dirs = True
         else:
             if not e.startswith("."):
@@ -70,32 +70,31 @@ def ensure_playlists():
 def get_playlists():
     """Return sorted list of playlist directory names."""
     entries = listdir_safe(MEDIA_DIR)
-    playlists = []
+    result = []
     for e in sorted(entries):
         if is_dir(MEDIA_DIR + "/" + e) and not e.startswith("."):
-            playlists.append(e)
-    return playlists
+            result.append(e)
+    return result
 
 
 def get_items(playlist):
-    """Return sorted list of media items (filenames or animation dir names) in a playlist."""
+    """Return sorted list of media items (filenames or animation dir names)."""
     pdir = MEDIA_DIR + "/" + playlist
     entries = sorted(listdir_safe(pdir))
-    items = []
+    result = []
     for e in entries:
         if e.startswith(".") or e == "meta.txt":
             continue
         full = pdir + "/" + e
         if is_dir(full):
-            # Animation directory (has frame_*.jpg files)
-            items.append(e)
-        elif e.lower().endswith(".jpg"):
-            items.append(e)
-    return items
+            result.append(e)
+        elif e.lower().endswith(".png"):
+            result.append(e)
+    return result
 
 
 def read_meta(anim_dir):
-    """Read meta.txt from an animation directory. Returns (frame_count, delay_ms)."""
+    """Read meta.txt from an animation directory. Returns (frame_count, delay_ticks)."""
     frame_count = 0
     delay_ms = 100
     try:
@@ -107,224 +106,187 @@ def read_meta(anim_dir):
                 elif line.startswith("delay_ms="):
                     delay_ms = int(line.split("=")[1])
     except OSError:
-        # No meta.txt, count frames manually
-        frames = [f for f in listdir_safe(anim_dir) if f.startswith("frame_") and f.endswith(".jpg")]
+        frames = [f for f in listdir_safe(anim_dir) if f.startswith("frame_") and f.endswith(".png")]
         frame_count = len(frames)
-    return frame_count, delay_ms
+    # Convert delay_ms to approximate ticks (assuming ~60fps → ~16ms per tick)
+    delay_ticks = max(delay_ms // 16, 1)
+    return frame_count, delay_ticks
 
 
-def draw_overlay(display, playlists, current_idx):
+def current_path():
+    if not items:
+        return None
+    return MEDIA_DIR + "/" + playlists[playlist_idx] + "/" + items[item_idx]
+
+
+def is_animation(path):
+    return path is not None and is_dir(path)
+
+
+def load_image(path):
+    """Load an image, freeing the previous one first."""
+    global current_img
+    current_img = None
+    gc.collect()
+    try:
+        current_img = image.load(path)
+    except Exception as e:
+        current_img = None
+        print("Error loading:", path, e)
+
+
+def load_item():
+    """Load the current media item."""
+    global anim_frame, anim_count, anim_delay, anim_tick, paused, needs_redraw
+    path = current_path()
+    anim_frame = 0
+    anim_tick = 0
+    paused = False
+    if path and is_animation(path):
+        anim_count, anim_delay = read_meta(path)
+        frame_path = path + "/frame_{:03d}.png".format(anim_frame)
+        load_image(frame_path)
+    elif path:
+        anim_count = 0
+        anim_delay = 6
+        load_image(path)
+    needs_redraw = True
+
+
+def switch_playlist(new_idx):
+    global playlist_idx, items, item_idx, overlay_ticks_left
+    playlist_idx = new_idx
+    items = get_items(playlists[playlist_idx])
+    item_idx = 0
+    overlay_ticks_left = OVERLAY_TICKS
+    load_item()
+
+
+def draw_overlay():
     """Draw playlist name overlay in bottom-left with faded prev/next names."""
-    # Colors
-    white = display.create_pen(255, 255, 255)
-    dim = display.create_pen(120, 120, 120)
-    shadow = display.create_pen(0, 0, 0)
-    bg = display.create_pen(0, 0, 0)
-
     n = len(playlists)
-    current_name = playlists[current_idx]
-    prev_name = playlists[(current_idx - 1) % n] if n > 1 else ""
-    next_name = playlists[(current_idx + 1) % n] if n > 1 else ""
+    if n == 0:
+        return
 
-    display.set_font("bitmap8")
+    current_name = playlists[playlist_idx]
+    prev_name = playlists[(playlist_idx - 1) % n] if n > 1 else ""
+    next_name = playlists[(playlist_idx + 1) % n] if n > 1 else ""
 
     # Background box
-    box_x = 0
     box_w = 160
-    box_h = 48 if n > 1 else 20
-    box_y = DISPLAY_H - box_h
+    if n > 1:
+        box_h = 48
+    else:
+        box_h = 20
+    box_y = screen.height - box_h
 
-    display.set_pen(bg)
-    display.rectangle(box_x, box_y, box_w, box_h)
+    screen.pen = color.rgb(0, 0, 0, 200)
+    screen.rectangle(0, box_y, box_w, box_h)
 
     x = 6
     if n > 1:
-        # Previous playlist (dimmed, above current)
-        display.set_pen(dim)
-        display.text(prev_name, x, box_y + 4, box_w, 1)
+        # Previous playlist (dimmed)
+        screen.pen = color.rgb(120, 120, 120)
+        screen.text(prev_name, x, box_y + 4)
 
-        # Current playlist (bright)
-        display.set_pen(white)
-        display.text("> " + current_name, x, box_y + 18, box_w, 1)
+        # Current playlist (bright, with indicator)
+        screen.pen = color.rgb(255, 255, 255)
+        screen.text("> " + current_name, x, box_y + 18)
 
-        # Next playlist (dimmed, below current)
-        display.set_pen(dim)
-        display.text(next_name, x, box_y + 32, box_w, 1)
+        # Next playlist (dimmed)
+        screen.pen = color.rgb(120, 120, 120)
+        screen.text(next_name, x, box_y + 32)
     else:
-        display.set_pen(white)
-        display.text(current_name, x, box_y + 4, box_w, 1)
+        screen.pen = color.rgb(255, 255, 255)
+        screen.text(current_name, x, box_y + 4)
 
 
-def show_image(display, jpeg, path):
-    """Display a JPEG image on screen."""
-    try:
-        jpeg.open_file(path)
-        jpeg.decode(0, 0)
-    except Exception as e:
-        display.set_pen(display.create_pen(255, 0, 0))
-        display.set_font("bitmap8")
-        display.text("Error: " + str(e), 10, 110, 300, 1)
-
-
-def show_no_media(display):
+def show_no_media():
     """Show a message when no media is found."""
-    black = display.create_pen(0, 0, 0)
-    white = display.create_pen(255, 255, 255)
-    display.set_pen(black)
-    display.clear()
-    display.set_pen(white)
-    display.set_font("bitmap8")
-    display.text("No media found", 80, 100, 300, 2)
-    display.text("Add images to media/", 60, 130, 300, 1)
-    display.update()
+    screen.pen = color.rgb(0, 0, 0)
+    screen.clear()
+    screen.pen = color.rgb(255, 255, 255)
+    screen.text("No media found", 60, 100)
+    screen.text("Add images to media/", 40, 130)
 
 
-def main():
-    display = PicoGraphics(display=DISPLAY_TUFTY_2350)
-    display.set_backlight(1.0)
-    jpeg = JPEG(display)
+def init():
+    global playlists, items
 
     ensure_playlists()
     playlists = get_playlists()
 
     if not playlists:
-        show_no_media(display)
-        while True:
-            time.sleep(1)
+        return
 
-    playlist_idx = 0
     items = get_items(playlists[playlist_idx])
-    item_idx = 0
-
-    # Animation state
-    anim_frame = 0
-    anim_count = 0
-    anim_delay = 100
-    paused = False
-
-    # Overlay state
-    overlay_until = 0
-    show_overlay = True
-
-    # Track what's displayed to avoid unnecessary redraws
-    needs_redraw = True
-    last_button_time = 0
-
-    def now_ms():
-        return time.ticks_ms()
-
-    def debounced():
-        nonlocal last_button_time
-        t = now_ms()
-        if time.ticks_diff(t, last_button_time) < DEBOUNCE_MS:
-            return False
-        last_button_time = t
-        return True
-
-    def current_path():
-        if not items:
-            return None
-        return MEDIA_DIR + "/" + playlists[playlist_idx] + "/" + items[item_idx]
-
-    def is_animation(path):
-        return path is not None and is_dir(path)
-
-    def load_item():
-        nonlocal anim_frame, anim_count, anim_delay, paused, needs_redraw
-        path = current_path()
-        anim_frame = 0
-        paused = False
-        if path and is_animation(path):
-            anim_count, anim_delay = read_meta(path)
-        else:
-            anim_count = 0
-            anim_delay = 100
-        needs_redraw = True
-
-    def switch_playlist(new_idx):
-        nonlocal playlist_idx, items, item_idx, overlay_until, show_overlay
-        playlist_idx = new_idx
-        items = get_items(playlists[playlist_idx])
-        item_idx = 0
-        overlay_until = time.ticks_add(now_ms(), OVERLAY_DURATION_MS)
-        show_overlay = True
+    if items:
         load_item()
+        overlay_ticks_left = OVERLAY_TICKS
 
-    # Initial load
-    load_item()
-    overlay_until = time.ticks_add(now_ms(), OVERLAY_DURATION_MS)
 
-    while True:
-        t = now_ms()
+def update():
+    global item_idx, anim_frame, anim_tick, paused
+    global needs_redraw, overlay_ticks_left
 
-        # Button handling
-        if is_pressed(btn_a) and debounced():
-            if items:
-                item_idx = (item_idx - 1) % len(items)
-                load_item()
+    if not playlists:
+        show_no_media()
+        return
 
-        if is_pressed(btn_c) and debounced():
-            if items:
-                item_idx = (item_idx + 1) % len(items)
-                load_item()
+    # Button handling
+    if io.BUTTON_A in io.pressed:
+        if items:
+            item_idx = (item_idx - 1) % len(items)
+            load_item()
 
-        if is_pressed(btn_b) and debounced():
-            path = current_path()
-            if path and is_animation(path):
-                paused = not paused
+    if io.BUTTON_C in io.pressed:
+        if items:
+            item_idx = (item_idx + 1) % len(items)
+            load_item()
 
-        if is_pressed(btn_up) and debounced():
-            new_idx = (playlist_idx - 1) % len(playlists)
-            switch_playlist(new_idx)
-
-        if is_pressed(btn_down) and debounced():
-            new_idx = (playlist_idx + 1) % len(playlists)
-            switch_playlist(new_idx)
-
-        # Rendering
+    if io.BUTTON_B in io.pressed:
         path = current_path()
+        if path and is_animation(path):
+            paused = not paused
 
-        if path is None:
-            show_no_media(display)
-            time.sleep_ms(100)
-            continue
+    if io.BUTTON_UP in io.pressed:
+        new_idx = (playlist_idx - 1) % len(playlists)
+        switch_playlist(new_idx)
 
-        if is_animation(path):
-            if not paused or needs_redraw:
-                frame_path = path + "/frame_{:03d}.jpg".format(anim_frame)
-                show_image(display, jpeg, frame_path)
+    if io.BUTTON_DOWN in io.pressed:
+        new_idx = (playlist_idx + 1) % len(playlists)
+        switch_playlist(new_idx)
 
-                # Draw overlay if active
-                if time.ticks_diff(overlay_until, t) > 0:
-                    draw_overlay(display, playlists, playlist_idx)
+    # Animation tick
+    path = current_path()
+    if path and is_animation(path) and not paused:
+        anim_tick += 1
+        if anim_tick >= anim_delay:
+            anim_tick = 0
+            anim_frame = (anim_frame + 1) % max(anim_count, 1)
+            frame_path = path + "/frame_{:03d}.png".format(anim_frame)
+            load_image(frame_path)
+            needs_redraw = True
 
-                display.update()
-                needs_redraw = False
+    # Rendering
+    if path is None:
+        show_no_media()
+        return
 
-                if not paused:
-                    anim_frame = (anim_frame + 1) % max(anim_count, 1)
-                    time.sleep_ms(anim_delay)
-            else:
-                # Paused, just check buttons
-                time.sleep_ms(50)
-        else:
-            # Static image
-            if needs_redraw:
-                show_image(display, jpeg, path)
+    if needs_redraw or overlay_ticks_left > 0:
+        screen.pen = color.rgb(0, 0, 0)
+        screen.clear()
 
-                # Draw overlay if active
-                if time.ticks_diff(overlay_until, t) > 0:
-                    draw_overlay(display, playlists, playlist_idx)
+        if current_img:
+            screen.blit(current_img, vec2(0, 0))
 
-                display.update()
-                needs_redraw = False
+        if overlay_ticks_left > 0:
+            draw_overlay()
+            overlay_ticks_left -= 1
+            if overlay_ticks_left == 0:
+                needs_redraw = True  # redraw without overlay
 
-            # Check if overlay needs clearing
-            if show_overlay and time.ticks_diff(overlay_until, t) <= 0:
-                show_overlay = False
-                needs_redraw = True
-
-            time.sleep_ms(50)
+        needs_redraw = False
 
 
-main()
+run(update, init=init)
