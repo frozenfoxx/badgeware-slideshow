@@ -27,7 +27,6 @@ item_idx = 0
 # Animation state
 anim_frame = 0
 anim_count = 0
-anim_delay = 6  # ticks between frames
 anim_tick = 0
 paused = False
 
@@ -39,6 +38,7 @@ current_img = None
 
 
 def listdir_safe(path):
+    """List directory contents, returning empty list on error."""
     try:
         return os.listdir(path)
     except OSError:
@@ -46,6 +46,7 @@ def listdir_safe(path):
 
 
 def is_dir(path):
+    """Check if path is a directory."""
     try:
         return (os.stat(path)[0] & 0x4000) != 0
     except OSError:
@@ -57,14 +58,15 @@ def ensure_playlists():
     entries = listdir_safe(MEDIA_DIR)
     has_dirs = False
     loose_files = []
+
     for e in entries:
         full = MEDIA_DIR + "/" + e
+        if e.startswith("."):
+            continue
         if is_dir(full):
-            if not e.startswith("."):
-                has_dirs = True
+            has_dirs = True
         else:
-            if not e.startswith("."):
-                loose_files.append(e)
+            loose_files.append(e)
 
     if not has_dirs and loose_files:
         default_dir = MEDIA_DIR + "/default"
@@ -78,53 +80,49 @@ def ensure_playlists():
 
 def get_playlists():
     """Return sorted list of playlist directory names."""
-    entries = listdir_safe(MEDIA_DIR)
-    result = []
-    for e in sorted(entries):
-        if is_dir(MEDIA_DIR + "/" + e) and not e.startswith("."):
-            result.append(e)
-    return result
+    return [
+        e for e in sorted(listdir_safe(MEDIA_DIR))
+        if is_dir(MEDIA_DIR + "/" + e) and not e.startswith(".")
+    ]
 
 
 def get_items(playlist):
     """Return sorted list of media items (filenames or animation dir names)."""
     pdir = MEDIA_DIR + "/" + playlist
-    entries = sorted(listdir_safe(pdir))
     result = []
-    for e in entries:
+    for e in sorted(listdir_safe(pdir)):
         if e.startswith(".") or e == "meta.txt":
             continue
         full = pdir + "/" + e
-        if is_dir(full):
-            result.append(e)
-        elif e.lower().endswith(".png"):
+        if is_dir(full) or e.lower().endswith(".png"):
             result.append(e)
     return result
 
 
-def read_meta(anim_dir):
-    """Read meta.txt from an animation directory. Returns (frame_count, delay_ticks)."""
-    frame_count = 0
+def get_frame_count(anim_dir):
+    """Get frame count from an animation directory's meta.txt or by counting files."""
     try:
         with open(anim_dir + "/meta.txt", "r") as f:
             for line in f:
-                line = line.strip()
                 if line.startswith("frame_count="):
-                    frame_count = int(line.split("=")[1])
+                    return int(line.strip().split("=")[1])
     except OSError:
-        frames = [f for f in listdir_safe(anim_dir) if f.startswith("frame_") and f.endswith(".png")]
-        frame_count = len(frames)
-    # Advance one frame per update() tick; PNG loading time is the natural rate limiter
-    return frame_count, 1
+        pass
+    return len([
+        f for f in listdir_safe(anim_dir)
+        if f.startswith("frame_") and f.endswith(".png")
+    ])
 
 
 def current_path():
+    """Get the full path of the current media item."""
     if not items:
         return None
     return MEDIA_DIR + "/" + playlists[playlist_idx] + "/" + items[item_idx]
 
 
 def is_animation(path):
+    """Check if a media item is an animation directory."""
     return path is not None and is_dir(path)
 
 
@@ -142,22 +140,22 @@ def load_image(path):
 
 def load_item():
     """Load the current media item."""
-    global anim_frame, anim_count, anim_delay, anim_tick, paused
+    global anim_frame, anim_count, anim_tick, paused
     path = current_path()
     anim_frame = 0
     anim_tick = 0
     paused = False
+
     if path and is_animation(path):
-        anim_count, anim_delay = read_meta(path)
-        frame_path = path + "/frame_{:03d}.png".format(anim_frame)
-        load_image(frame_path)
+        anim_count = get_frame_count(path)
+        load_image(path + "/frame_000.png")
     elif path:
         anim_count = 0
-        anim_delay = 6
         load_image(path)
 
 
 def switch_playlist(new_idx):
+    """Switch to a different playlist by index."""
     global playlist_idx, items, item_idx, overlay_ticks_left
     playlist_idx = new_idx
     items = get_items(playlists[playlist_idx])
@@ -173,15 +171,10 @@ def draw_overlay():
         return
 
     current_name = playlists[playlist_idx]
-    prev_name = playlists[(playlist_idx - 1) % n] if n > 1 else ""
-    next_name = playlists[(playlist_idx + 1) % n] if n > 1 else ""
 
     # Background box
     box_w = 160
-    if n > 1:
-        box_h = 48
-    else:
-        box_h = 20
+    box_h = 48 if n > 1 else 20
     box_y = screen.height - box_h
 
     screen.pen = color.rgb(0, 0, 0, 200)
@@ -189,15 +182,15 @@ def draw_overlay():
 
     x = 6
     if n > 1:
-        # Previous playlist (dimmed)
+        prev_name = playlists[(playlist_idx - 1) % n]
+        next_name = playlists[(playlist_idx + 1) % n]
+
         screen.pen = color.rgb(120, 120, 120)
         screen.text(prev_name, x, box_y + 4)
 
-        # Current playlist (bright, with indicator)
         screen.pen = color.rgb(255, 255, 255)
         screen.text("> " + current_name, x, box_y + 18)
 
-        # Next playlist (dimmed)
         screen.pen = color.rgb(120, 120, 120)
         screen.text(next_name, x, box_y + 32)
     else:
@@ -215,7 +208,8 @@ def show_no_media():
 
 
 def init():
-    global playlists, items
+    """Initialize playlists and load first item."""
+    global playlists, items, overlay_ticks_left
 
     ensure_playlists()
     playlists = get_playlists()
@@ -230,6 +224,7 @@ def init():
 
 
 def update():
+    """Main update loop called by Badgeware framework each frame."""
     global item_idx, anim_frame, anim_tick, paused
     global overlay_ticks_left
 
@@ -238,15 +233,13 @@ def update():
         return
 
     # Button handling
-    if io.BUTTON_A in io.pressed:
-        if items:
-            item_idx = (item_idx - 1) % len(items)
-            load_item()
+    if io.BUTTON_A in io.pressed and items:
+        item_idx = (item_idx - 1) % len(items)
+        load_item()
 
-    if io.BUTTON_C in io.pressed:
-        if items:
-            item_idx = (item_idx + 1) % len(items)
-            load_item()
+    if io.BUTTON_C in io.pressed and items:
+        item_idx = (item_idx + 1) % len(items)
+        load_item()
 
     if io.BUTTON_B in io.pressed:
         path = current_path()
@@ -254,24 +247,21 @@ def update():
             paused = not paused
 
     if io.BUTTON_UP in io.pressed:
-        new_idx = (playlist_idx - 1) % len(playlists)
-        switch_playlist(new_idx)
+        switch_playlist((playlist_idx - 1) % len(playlists))
 
     if io.BUTTON_DOWN in io.pressed:
-        new_idx = (playlist_idx + 1) % len(playlists)
-        switch_playlist(new_idx)
+        switch_playlist((playlist_idx + 1) % len(playlists))
 
-    # Animation tick
+    # Advance animation frame
     path = current_path()
     if path and is_animation(path) and not paused:
         anim_tick += 1
-        if anim_tick >= anim_delay:
+        if anim_tick >= 1:
             anim_tick = 0
             anim_frame = (anim_frame + 1) % max(anim_count, 1)
-            frame_path = path + "/frame_{:03d}.png".format(anim_frame)
-            load_image(frame_path)
+            load_image(path + "/frame_{:03d}.png".format(anim_frame))
 
-    # Rendering - must draw every frame as the framework clears between updates
+    # Render - must draw every frame as the framework clears between updates
     if path is None:
         show_no_media()
         return

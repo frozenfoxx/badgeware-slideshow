@@ -43,6 +43,20 @@ SUPPORTED_VIDEOS = {".mp4", ".avi", ".mov", ".webm", ".mkv"}
 ALL_SUPPORTED = SUPPORTED_IMAGES | SUPPORTED_GIFS | SUPPORTED_VIDEOS
 
 
+def unique_name(path):
+    """Return a unique path by appending _N if it already exists.
+
+    Works for both files and directories.
+    """
+    if not os.path.exists(path):
+        return path
+    base, ext = os.path.splitext(path)
+    counter = 1
+    while os.path.exists(f"{base}_{counter}{ext}"):
+        counter += 1
+    return f"{base}_{counter}{ext}"
+
+
 def letterbox(img, target_w, target_h):
     """Resize image to fit within target dimensions, letterboxing with black."""
     img_w, img_h = img.size
@@ -59,68 +73,71 @@ def letterbox(img, target_w, target_h):
 
 def save_png(img, path):
     """Save image as PNG."""
-    img = img.convert("RGB")
-    img.save(path, "PNG")
+    img.convert("RGB").save(path, "PNG")
 
 
 def is_badge_ready_png(path):
     """Check if a PNG is already 320x240."""
     try:
         with Image.open(path) as img:
-            if img.format != "PNG":
-                return False
-            if img.size != (DISPLAY_WIDTH, DISPLAY_HEIGHT):
-                return False
-            return True
+            return img.format == "PNG" and img.size == (DISPLAY_WIDTH, DISPLAY_HEIGHT)
     except Exception:
         return False
 
 
-def unique_path(path):
-    """Return a unique path by appending _N if it already exists."""
-    if not os.path.exists(path):
-        return path
-    base, ext = os.path.splitext(path)
-    counter = 1
-    while os.path.exists(f"{base}_{counter}{ext}"):
-        counter += 1
-    return f"{base}_{counter}{ext}"
+def is_converted_anim_dir(path):
+    """Check if a directory is an already-converted animation (has meta.txt and frame files)."""
+    if not os.path.isdir(path):
+        return False
+    contents = os.listdir(path)
+    has_meta = "meta.txt" in contents
+    has_frames = any(f.startswith("frame_") and f.endswith(".png") for f in contents)
+    return has_meta and has_frames
 
 
-def unique_dir(path):
-    """Return a unique directory path by appending _N if it already exists."""
-    if not os.path.exists(path):
-        return path
-    counter = 1
-    while os.path.exists(f"{path}_{counter}"):
-        counter += 1
-    return f"{path}_{counter}"
+def write_meta(frame_dir, frame_count, delay_ms):
+    """Write a meta.txt file for an animation directory."""
+    with open(os.path.join(frame_dir, "meta.txt"), "w") as f:
+        f.write(f"frame_count={frame_count}\n")
+        f.write(f"delay_ms={delay_ms}\n")
+
+
+def get_video_fps(input_path):
+    """Get the FPS of a video file using ffprobe. Returns 10 on failure."""
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-print_format", "json",
+             "-show_streams", str(input_path)],
+            capture_output=True, text=True, check=True
+        )
+        for stream in json.loads(result.stdout).get("streams", []):
+            if stream.get("codec_type") == "video":
+                num, den = stream.get("r_frame_rate", "10/1").split("/")
+                return float(num) / float(den)
+    except Exception:
+        pass
+    return 10.0
 
 
 def convert_static_image(input_path):
     """Convert a static image to 320x240 PNG in-place."""
     ext = Path(input_path).suffix.lower()
 
-    # If it's already a badge-ready PNG, skip it
     if ext == ".png" and is_badge_ready_png(input_path):
         print(f"  Already ready: {input_path}")
         return
 
-    img = Image.open(input_path)
-    img = letterbox(img, DISPLAY_WIDTH, DISPLAY_HEIGHT)
-
+    img = letterbox(Image.open(input_path), DISPLAY_WIDTH, DISPLAY_HEIGHT)
     stem = Path(input_path).stem
     parent = str(Path(input_path).parent)
     out_path = os.path.join(parent, f"{stem}.png")
 
     if ext != ".png":
-        # Different extension, write new file then delete original
-        out_path = unique_path(out_path)
+        out_path = unique_name(out_path)
         save_png(img, out_path)
         os.remove(input_path)
         print(f"  Converted: {input_path} -> {out_path}")
     else:
-        # PNG but wrong size, overwrite in-place
         save_png(img, input_path)
         print(f"  Re-encoded: {input_path}")
 
@@ -131,31 +148,23 @@ def convert_gif(input_path):
     n_frames = getattr(img, "n_frames", 1)
 
     if n_frames <= 1:
-        # Single-frame GIF, treat as static image
         convert_static_image(input_path)
         return
 
     stem = Path(input_path).stem
     parent = str(Path(input_path).parent)
-    frame_dir = unique_dir(os.path.join(parent, stem))
+    frame_dir = unique_name(os.path.join(parent, stem))
     os.makedirs(frame_dir)
 
-    # Get frame delay (in ms), default to 100ms
-    delay_ms = img.info.get("duration", 100)
-    if delay_ms == 0:
-        delay_ms = 100
+    delay_ms = img.info.get("duration", 100) or 100
 
     for i in range(n_frames):
         img.seek(i)
-        frame = img.convert("RGB")
-        frame = letterbox(frame, DISPLAY_WIDTH, DISPLAY_HEIGHT)
+        frame = letterbox(img.convert("RGB"), DISPLAY_WIDTH, DISPLAY_HEIGHT)
         save_png(frame, os.path.join(frame_dir, f"frame_{i:03d}.png"))
 
-    with open(os.path.join(frame_dir, "meta.txt"), "w") as f:
-        f.write(f"frame_count={n_frames}\n")
-        f.write(f"delay_ms={delay_ms}\n")
+    write_meta(frame_dir, n_frames, delay_ms)
 
-    # Remove original GIF
     img.close()
     os.remove(input_path)
     print(f"  Converted GIF ({n_frames} frames): {input_path} -> {frame_dir}")
@@ -169,32 +178,13 @@ def convert_video(input_path):
 
     stem = Path(input_path).stem
     parent = str(Path(input_path).parent)
-    frame_dir = unique_dir(os.path.join(parent, stem))
+    frame_dir = unique_name(os.path.join(parent, stem))
     os.makedirs(frame_dir)
 
-    # Get video FPS
-    try:
-        result = subprocess.run(
-            ["ffprobe", "-v", "quiet", "-print_format", "json",
-             "-show_streams", str(input_path)],
-            capture_output=True, text=True, check=True
-        )
-        streams = json.loads(result.stdout)
-        fps = 10  # default
-        for stream in streams.get("streams", []):
-            if stream.get("codec_type") == "video":
-                r_fps = stream.get("r_frame_rate", "10/1")
-                num, den = r_fps.split("/")
-                fps = float(num) / float(den)
-                break
-    except Exception:
-        fps = 10
-
-    # Cap FPS to avoid too many frames on the constrained device
+    fps = get_video_fps(input_path)
     target_fps = min(fps, 15)
     delay_ms = int(1000 / target_fps)
 
-    # Extract frames with ffmpeg as PNG
     with tempfile.TemporaryDirectory() as tmpdir:
         subprocess.run(
             ["ffmpeg", "-i", str(input_path), "-vf",
@@ -213,23 +203,10 @@ def convert_video(input_path):
             )
 
     frame_count = len([x for x in os.listdir(frame_dir) if x.endswith(".png")])
-    with open(os.path.join(frame_dir, "meta.txt"), "w") as f:
-        f.write(f"frame_count={frame_count}\n")
-        f.write(f"delay_ms={delay_ms}\n")
+    write_meta(frame_dir, frame_count, delay_ms)
 
-    # Remove original video
     os.remove(input_path)
     print(f"  Converted video ({frame_count} frames @ {target_fps}fps): {input_path} -> {frame_dir}")
-
-
-def is_converted_anim_dir(path):
-    """Check if a directory is an already-converted animation (has meta.txt and frame files)."""
-    if not os.path.isdir(path):
-        return False
-    contents = os.listdir(path)
-    has_meta = "meta.txt" in contents
-    has_frames = any(f.startswith("frame_") and f.endswith(".png") for f in contents)
-    return has_meta and has_frames
 
 
 def process_file(file_path):
@@ -255,7 +232,6 @@ def process_playlist(playlist_dir):
     for entry in entries:
         full_path = os.path.join(playlist_dir, entry)
 
-        # Skip hidden files and already-converted animation directories
         if entry.startswith("."):
             continue
         if os.path.isdir(full_path):
@@ -263,8 +239,7 @@ def process_playlist(playlist_dir):
                 print(f"  Already converted: {full_path}")
             continue
 
-        ext = Path(entry).suffix.lower()
-        if ext in ALL_SUPPORTED:
+        if Path(entry).suffix.lower() in ALL_SUPPORTED:
             found = True
             process_file(full_path)
 
@@ -290,7 +265,6 @@ def main():
 
     print(f"Media directory: {media_dir}\n")
 
-    # Find all playlist directories
     playlists = sorted(
         entry for entry in os.listdir(media_dir)
         if os.path.isdir(os.path.join(media_dir, entry)) and not entry.startswith(".")
